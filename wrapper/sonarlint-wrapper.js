@@ -158,6 +158,11 @@ const RAW_ANALYZERS = (
   .filter(Boolean);
 const JAVA_HOME = process.env.JAVA_HOME || "";
 const DEBUG = process.env.SONARLINT_DEBUG === "1";
+const WORKSPACE_ROOT =
+  process.env.SONARLINT_WORKSPACE_ROOT &&
+  fs.existsSync(process.env.SONARLINT_WORKSPACE_ROOT)
+    ? process.env.SONARLINT_WORKSPACE_ROOT
+    : process.cwd();
 
 if (!RAW_SERVER_JAR) {
   process.stderr.write(
@@ -184,8 +189,127 @@ function log(...args) {
   logStream.write(line);
 }
 
+// ─── SonarJS bridge path casing workaround ───────────────────────────────────
+
+/**
+ * SonarJS may normalize paths to lowercase for comparison and then later reuse
+ * those normalized values for filesystem reads. This breaks on case-sensitive
+ * volumes because the real workspace path casing must be preserved.
+ *
+ * The hook below is loaded only into Node.js child processes spawned by the Java
+ * language server. It rewrites paths under a lowercased workspace root back to
+ * the original workspace-root casing before fs reads.
+ */
+function writePathCaseFixHook() {
+  const os = require("os");
+  const hookPath = path.join(os.tmpdir(), "sonarlint-node-path-case-fix.js");
+
+  fs.writeFileSync(
+    hookPath,
+    String.raw`
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+
+const originalAppendFileSync = fs.appendFileSync;
+const DEBUG = process.env.SONARLINT_DEBUG === "1";
+const LOG_PATH = process.env.SONARLINT_CASE_FIX_LOG || "";
+const WORKSPACE_ROOT = process.env.SONARLINT_WORKSPACE_ROOT || "";
+const LOWER_WORKSPACE_ROOT = WORKSPACE_ROOT.toLowerCase();
+
+function log(...parts) {
+  if (!DEBUG || !LOG_PATH) return;
+
+  try {
+    originalAppendFileSync.call(
+      fs,
+      LOG_PATH,
+      "[" + new Date().toISOString() + " pid=" + process.pid + "] " + parts.map(String).join(" ") + "\n",
+    );
+  } catch {
+    // Never break SonarLint because workaround logging failed.
+  }
+}
+
+function fixPath(value) {
+  if (typeof value !== "string" || !WORKSPACE_ROOT) {
+    return value;
+  }
+
+  const lower = value.toLowerCase();
+
+  if (lower === LOWER_WORKSPACE_ROOT) {
+    if (value !== WORKSPACE_ROOT) {
+      log("fix", value, "=>", WORKSPACE_ROOT);
+    }
+    return WORKSPACE_ROOT;
+  }
+
+  if (lower.startsWith(LOWER_WORKSPACE_ROOT + path.sep)) {
+    const fixed = WORKSPACE_ROOT + value.slice(LOWER_WORKSPACE_ROOT.length);
+    if (fixed !== value) {
+      log("fix", value, "=>", fixed);
+    }
+    return fixed;
+  }
+
+  return value;
+}
+
+function patchSync(name) {
+  const original = fs[name];
+  if (typeof original !== "function") return;
+
+  fs[name] = function patchedPathFunction(value, ...args) {
+    return original.call(this, fixPath(value), ...args);
+  };
+}
+
+for (const name of [
+  "readFileSync",
+  "existsSync",
+  "statSync",
+  "lstatSync",
+  "accessSync",
+  "openSync",
+  "readdirSync",
+  "realpathSync",
+]) {
+  patchSync(name);
+}
+
+if (fs.realpathSync && typeof fs.realpathSync.native === "function") {
+  const originalNativeRealpathSync = fs.realpathSync.native;
+  fs.realpathSync.native = function patchedNativeRealpathSync(value, ...args) {
+    return originalNativeRealpathSync.call(this, fixPath(value), ...args);
+  };
+}
+
+const originalReadFile = fs.readFile;
+fs.readFile = function patchedReadFile(value, ...args) {
+  return originalReadFile.call(this, fixPath(value), ...args);
+};
+
+if (fs.promises && typeof fs.promises.readFile === "function") {
+  const originalPromisesReadFile = fs.promises.readFile.bind(fs.promises);
+  fs.promises.readFile = function patchedPromisesReadFile(value, ...args) {
+    return originalPromisesReadFile(fixPath(value), ...args);
+  };
+}
+
+log("case-fix loaded");
+log("workspace root", WORKSPACE_ROOT);
+`,
+    "utf8",
+  );
+
+  return hookPath;
+}
+
 log("=== Wrapper started ===");
 log("CWD:", process.cwd());
+log("WORKSPACE_ROOT:", WORKSPACE_ROOT);
 log("SERVER_JAR:", SERVER_JAR);
 log("exists:", fs.existsSync(SERVER_JAR));
 log("JAVA_PATH:", JAVA_PATH);
@@ -339,9 +463,26 @@ if (JAVA_HOME) {
   javaEnv.JAVA_HOME = JAVA_HOME;
 }
 
+javaEnv.SONARLINT_WORKSPACE_ROOT = WORKSPACE_ROOT;
+
+if (DEBUG) {
+  javaEnv.SONARLINT_CASE_FIX_LOG = LOG_PATH;
+}
+
+const pathCaseFixHook = writePathCaseFixHook();
+
+javaEnv.NODE_OPTIONS = [
+  javaEnv.NODE_OPTIONS || "",
+  `--require=${pathCaseFixHook}`,
+]
+  .filter(Boolean)
+  .join(" ");
+
 log("Starting:", JAVA_PATH, javaArgs.join(" "));
+log("JAVA NODE_OPTIONS:", javaEnv.NODE_OPTIONS);
 
 const serverProcess = spawn(JAVA_PATH, javaArgs, {
+  cwd: WORKSPACE_ROOT,
   stdio: ["pipe", "pipe", "pipe"],
   env: javaEnv,
 });
@@ -620,25 +761,31 @@ function findSharedConfigForScope(scopeUri) {
 
 /**
  * Qualify a project key for SonarCloud connections.
- * SonarCloud project keys must be in the format "<organizationKey>_<projectKey>".
- * If the connection is SonarCloud and the project key doesn't already have the org prefix,
- * prepend it automatically.
- * Returns the (possibly prefixed) project key.
+ *
+ * Some SonarCloud projects use keys in the format "<organizationKey>_<projectKey>".
+ * To preserve compatibility with that convention, bare SonarCloud project keys
+ * are prefixed with the matching organization key.
+ *
+ * Project keys that already contain "_" are assumed to already be exact keys or
+ * underscore-separated keys and are left unchanged.
  */
 function qualifyProjectKey(connectionId, projectKey) {
   if (!connectionId || !projectKey) return projectKey;
+
+  if (projectKey.includes("_")) {
+    log(
+      `SonarCloud project key already contains "_"; leaving unchanged: "${projectKey}"`,
+    );
+    return projectKey;
+  }
 
   // Find the matching SonarCloud connection
   for (const conn of connectionConfigs.sonarcloud || []) {
     const connId = conn.connectionId || conn.organizationKey;
     if (connId === connectionId && conn.organizationKey) {
-      const prefix = conn.organizationKey + "_";
-      if (!projectKey.startsWith(prefix)) {
-        const qualified = prefix + projectKey;
-        log(`Qualified SonarCloud project key: "${projectKey}" → "${qualified}"`);
-        return qualified;
-      }
-      break;
+      const qualified = conn.organizationKey + "_" + projectKey;
+      log(`Qualified SonarCloud project key: "${projectKey}" → "${qualified}"`);
+      return qualified;
     }
   }
 
