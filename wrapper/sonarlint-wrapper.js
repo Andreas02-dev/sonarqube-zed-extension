@@ -339,8 +339,6 @@ if (JAVA_HOME) {
   javaEnv.JAVA_HOME = JAVA_HOME;
 }
 
-javaEnv.NODE_OPTIONS = [javaEnv.NODE_OPTIONS || ""].filter(Boolean).join(" ");
-
 log("Starting:", JAVA_PATH, javaArgs.join(" "));
 
 const serverProcess = spawn(JAVA_PATH, javaArgs, {
@@ -1230,7 +1228,9 @@ function handleServerNotification(msg) {
       log("→ suggestConnection:", JSON.stringify(params));
       const suggestionsByScope =
         params?.suggestionsByConfigScopeId || params?.suggestions || {};
-      for (const [scopeId, suggestions] of Object.entries(suggestionsByScope)) {
+      for (const [scopeId, suggestions] of Object.entries(
+        suggestionsByScope,
+      )) {
         for (const suggestion of suggestions || []) {
           const conn = suggestion.connectionSuggestion || suggestion;
           const target = conn.serverUrl || conn.organization || "unknown";
