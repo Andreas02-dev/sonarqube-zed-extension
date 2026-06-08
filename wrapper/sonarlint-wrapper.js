@@ -189,127 +189,9 @@ function log(...args) {
   logStream.write(line);
 }
 
-// ─── SonarJS bridge path casing workaround ───────────────────────────────────
-
-/**
- * SonarJS may normalize paths to lowercase for comparison and then later reuse
- * those normalized values for filesystem reads. This breaks on case-sensitive
- * volumes because the real workspace path casing must be preserved.
- *
- * The hook below is loaded only into Node.js child processes spawned by the Java
- * language server. It rewrites paths under a lowercased workspace root back to
- * the original workspace-root casing before fs reads.
- */
-function writePathCaseFixHook() {
-  const os = require("os");
-  const hookPath = path.join(os.tmpdir(), "sonarlint-node-path-case-fix.js");
-
-  fs.writeFileSync(
-    hookPath,
-    String.raw`
-"use strict";
-
-const fs = require("fs");
-const path = require("path");
-
-const originalAppendFileSync = fs.appendFileSync;
-const DEBUG = process.env.SONARLINT_DEBUG === "1";
-const LOG_PATH = process.env.SONARLINT_CASE_FIX_LOG || "";
-const WORKSPACE_ROOT = process.env.SONARLINT_WORKSPACE_ROOT || "";
-const LOWER_WORKSPACE_ROOT = WORKSPACE_ROOT.toLowerCase();
-
-function log(...parts) {
-  if (!DEBUG || !LOG_PATH) return;
-
-  try {
-    originalAppendFileSync.call(
-      fs,
-      LOG_PATH,
-      "[" + new Date().toISOString() + " pid=" + process.pid + "] " + parts.map(String).join(" ") + "\n",
-    );
-  } catch {
-    // Never break SonarLint because workaround logging failed.
-  }
-}
-
-function fixPath(value) {
-  if (typeof value !== "string" || !WORKSPACE_ROOT) {
-    return value;
-  }
-
-  const lower = value.toLowerCase();
-
-  if (lower === LOWER_WORKSPACE_ROOT) {
-    if (value !== WORKSPACE_ROOT) {
-      log("fix", value, "=>", WORKSPACE_ROOT);
-    }
-    return WORKSPACE_ROOT;
-  }
-
-  if (lower.startsWith(LOWER_WORKSPACE_ROOT + path.sep)) {
-    const fixed = WORKSPACE_ROOT + value.slice(LOWER_WORKSPACE_ROOT.length);
-    if (fixed !== value) {
-      log("fix", value, "=>", fixed);
-    }
-    return fixed;
-  }
-
-  return value;
-}
-
-function patchSync(name) {
-  const original = fs[name];
-  if (typeof original !== "function") return;
-
-  fs[name] = function patchedPathFunction(value, ...args) {
-    return original.call(this, fixPath(value), ...args);
-  };
-}
-
-for (const name of [
-  "readFileSync",
-  "existsSync",
-  "statSync",
-  "lstatSync",
-  "accessSync",
-  "openSync",
-  "readdirSync",
-  "realpathSync",
-]) {
-  patchSync(name);
-}
-
-if (fs.realpathSync && typeof fs.realpathSync.native === "function") {
-  const originalNativeRealpathSync = fs.realpathSync.native;
-  fs.realpathSync.native = function patchedNativeRealpathSync(value, ...args) {
-    return originalNativeRealpathSync.call(this, fixPath(value), ...args);
-  };
-}
-
-const originalReadFile = fs.readFile;
-fs.readFile = function patchedReadFile(value, ...args) {
-  return originalReadFile.call(this, fixPath(value), ...args);
-};
-
-if (fs.promises && typeof fs.promises.readFile === "function") {
-  const originalPromisesReadFile = fs.promises.readFile.bind(fs.promises);
-  fs.promises.readFile = function patchedPromisesReadFile(value, ...args) {
-    return originalPromisesReadFile(fixPath(value), ...args);
-  };
-}
-
-log("case-fix loaded");
-log("workspace root", WORKSPACE_ROOT);
-`,
-    "utf8",
-  );
-
-  return hookPath;
-}
-
 log("=== Wrapper started ===");
 log("CWD:", process.cwd());
-log("WORKSPACE_ROOT:", WORKSPACE_ROOT);
+log("WORKSPACE_ROOT:", WORKSPACE_ROOT);``
 log("SERVER_JAR:", SERVER_JAR);
 log("exists:", fs.existsSync(SERVER_JAR));
 log("JAVA_PATH:", JAVA_PATH);
@@ -469,14 +351,7 @@ if (DEBUG) {
   javaEnv.SONARLINT_CASE_FIX_LOG = LOG_PATH;
 }
 
-const pathCaseFixHook = writePathCaseFixHook();
-
-javaEnv.NODE_OPTIONS = [
-  javaEnv.NODE_OPTIONS || "",
-  `--require=${pathCaseFixHook}`,
-]
-  .filter(Boolean)
-  .join(" ");
+javaEnv.NODE_OPTIONS = [javaEnv.NODE_OPTIONS || ""].filter(Boolean).join(" ");
 
 log("Starting:", JAVA_PATH, javaArgs.join(" "));
 log("JAVA NODE_OPTIONS:", javaEnv.NODE_OPTIONS);
@@ -532,7 +407,7 @@ function isFocusOnNewCodeEnabled() {
 
 function filterNewCodeDiagnostics(diagnostics) {
   if (!Array.isArray(diagnostics)) return diagnostics;
-  return diagnostics.filter(d => {
+  return diagnostics.filter((d) => {
     if (d.data == null || d.data.isOnNewCode === undefined) {
       return true; // Keep diagnostics without the field
     }
@@ -550,7 +425,7 @@ function filterNewCodeDiagnostics(diagnostics) {
 function remapDiagnosticSeverities(diagnostics) {
   if (!Array.isArray(diagnostics)) return diagnostics;
   for (const d of diagnostics) {
-    if (d.data != null && typeof d.data.impactSeverity === 'number') {
+    if (d.data != null && typeof d.data.impactSeverity === "number") {
       switch (d.data.impactSeverity) {
         case 4: // BLOCKER
         case 3: // HIGH
@@ -895,7 +770,12 @@ new LspMessageReader(serverProcess.stdout, (msg) => {
     remapDiagnosticSeverities(msg.params.diagnostics);
     if (isFocusOnNewCodeEnabled()) {
       msg.params.diagnostics = filterNewCodeDiagnostics(msg.params.diagnostics);
-      log("Filtered diagnostics for focusOnNewCode:", msg.params.diagnostics.length, "remaining for", msg.params.uri);
+      log(
+        "Filtered diagnostics for focusOnNewCode:",
+        msg.params.diagnostics.length,
+        "remaining for",
+        msg.params.uri,
+      );
     }
   }
 
@@ -1086,13 +966,15 @@ function handleServerRequest(msg) {
           if (!config.connectedMode?.project?.projectKey) {
             const sharedConfig = findSharedConfigForScope(item.scopeUri);
             if (sharedConfig?.projectKey) {
-              const connectionId =
-                matchConnectionForSharedConfig(sharedConfig);
+              const connectionId = matchConnectionForSharedConfig(sharedConfig);
               if (connectionId) {
                 config.connectedMode = config.connectedMode || {};
                 config.connectedMode.project = {
                   connectionId,
-                  projectKey: qualifyProjectKey(connectionId, sharedConfig.projectKey),
+                  projectKey: qualifyProjectKey(
+                    connectionId,
+                    sharedConfig.projectKey,
+                  ),
                 };
                 log(
                   `Auto-bound scope ${item.scopeUri || "(default)"} to connection=${connectionId} project=${config.connectedMode.project.projectKey} from shared config`,
@@ -1369,9 +1251,7 @@ function handleServerNotification(msg) {
       log("→ suggestConnection:", JSON.stringify(params));
       const suggestionsByScope =
         params?.suggestionsByConfigScopeId || params?.suggestions || {};
-      for (const [scopeId, suggestions] of Object.entries(
-        suggestionsByScope,
-      )) {
+      for (const [scopeId, suggestions] of Object.entries(suggestionsByScope)) {
         for (const suggestion of suggestions || []) {
           const conn = suggestion.connectionSuggestion || suggestion;
           const target = conn.serverUrl || conn.organization || "unknown";
