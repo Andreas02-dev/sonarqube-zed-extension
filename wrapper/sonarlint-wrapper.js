@@ -158,11 +158,6 @@ const RAW_ANALYZERS = (
   .filter(Boolean);
 const JAVA_HOME = process.env.JAVA_HOME || "";
 const DEBUG = process.env.SONARLINT_DEBUG === "1";
-const WORKSPACE_ROOT =
-  process.env.SONARLINT_WORKSPACE_ROOT &&
-  fs.existsSync(process.env.SONARLINT_WORKSPACE_ROOT)
-    ? process.env.SONARLINT_WORKSPACE_ROOT
-    : process.cwd();
 
 if (!RAW_SERVER_JAR) {
   process.stderr.write(
@@ -191,7 +186,6 @@ function log(...args) {
 
 log("=== Wrapper started ===");
 log("CWD:", process.cwd());
-log("WORKSPACE_ROOT:", WORKSPACE_ROOT);``
 log("SERVER_JAR:", SERVER_JAR);
 log("exists:", fs.existsSync(SERVER_JAR));
 log("JAVA_PATH:", JAVA_PATH);
@@ -345,19 +339,11 @@ if (JAVA_HOME) {
   javaEnv.JAVA_HOME = JAVA_HOME;
 }
 
-javaEnv.SONARLINT_WORKSPACE_ROOT = WORKSPACE_ROOT;
-
-if (DEBUG) {
-  javaEnv.SONARLINT_CASE_FIX_LOG = LOG_PATH;
-}
-
 javaEnv.NODE_OPTIONS = [javaEnv.NODE_OPTIONS || ""].filter(Boolean).join(" ");
 
 log("Starting:", JAVA_PATH, javaArgs.join(" "));
-log("JAVA NODE_OPTIONS:", javaEnv.NODE_OPTIONS);
 
 const serverProcess = spawn(JAVA_PATH, javaArgs, {
-  cwd: WORKSPACE_ROOT,
   stdio: ["pipe", "pipe", "pipe"],
   env: javaEnv,
 });
@@ -407,7 +393,7 @@ function isFocusOnNewCodeEnabled() {
 
 function filterNewCodeDiagnostics(diagnostics) {
   if (!Array.isArray(diagnostics)) return diagnostics;
-  return diagnostics.filter((d) => {
+  return diagnostics.filter(d => {
     if (d.data == null || d.data.isOnNewCode === undefined) {
       return true; // Keep diagnostics without the field
     }
@@ -425,7 +411,7 @@ function filterNewCodeDiagnostics(diagnostics) {
 function remapDiagnosticSeverities(diagnostics) {
   if (!Array.isArray(diagnostics)) return diagnostics;
   for (const d of diagnostics) {
-    if (d.data != null && typeof d.data.impactSeverity === "number") {
+    if (d.data != null && typeof d.data.impactSeverity === 'number') {
       switch (d.data.impactSeverity) {
         case 4: // BLOCKER
         case 3: // HIGH
@@ -770,12 +756,7 @@ new LspMessageReader(serverProcess.stdout, (msg) => {
     remapDiagnosticSeverities(msg.params.diagnostics);
     if (isFocusOnNewCodeEnabled()) {
       msg.params.diagnostics = filterNewCodeDiagnostics(msg.params.diagnostics);
-      log(
-        "Filtered diagnostics for focusOnNewCode:",
-        msg.params.diagnostics.length,
-        "remaining for",
-        msg.params.uri,
-      );
+      log("Filtered diagnostics for focusOnNewCode:", msg.params.diagnostics.length, "remaining for", msg.params.uri);
     }
   }
 
@@ -966,15 +947,13 @@ function handleServerRequest(msg) {
           if (!config.connectedMode?.project?.projectKey) {
             const sharedConfig = findSharedConfigForScope(item.scopeUri);
             if (sharedConfig?.projectKey) {
-              const connectionId = matchConnectionForSharedConfig(sharedConfig);
+              const connectionId =
+                matchConnectionForSharedConfig(sharedConfig);
               if (connectionId) {
                 config.connectedMode = config.connectedMode || {};
                 config.connectedMode.project = {
                   connectionId,
-                  projectKey: qualifyProjectKey(
-                    connectionId,
-                    sharedConfig.projectKey,
-                  ),
+                  projectKey: qualifyProjectKey(connectionId, sharedConfig.projectKey),
                 };
                 log(
                   `Auto-bound scope ${item.scopeUri || "(default)"} to connection=${connectionId} project=${config.connectedMode.project.projectKey} from shared config`,

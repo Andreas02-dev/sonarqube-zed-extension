@@ -191,10 +191,6 @@ impl zed::Extension for SonarLintExtension {
                 "SONARLINT_ANALYZER_PATHS".to_string(),
                 analyzer_paths.join("|"),
             ),
-            (
-                "SONARLINT_WORKSPACE_ROOT".to_string(),
-                worktree.root_path(),
-            ),
         ];
 
         if let Some(java_home) = worktree.shell_env().iter().find(|(k, _)| k == "JAVA_HOME") {
